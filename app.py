@@ -79,6 +79,17 @@ def connect_db():
             balance_inr REAL NOT NULL
         )
     """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS mrindie_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp_ist TEXT NOT NULL,
+            type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            upi_id TEXT,
+            reference_no TEXT,
+            status TEXT NOT NULL
+        )
+    """)
     cursor = con.cursor()
     cursor.execute("SELECT balance_inr FROM mrindie_account_balance WHERE id = 1")
     row = cursor.fetchone()
@@ -111,7 +122,6 @@ def fetch_synchronized_market_data(symbol_label, timeframe_label):
     info = INDIAN_SYMBOLS[symbol_label]
     cfg = INTERVALS[timeframe_label]
     try:
-        # High precision yfinance stream aligned with NSE/TradingView prices
         ticker = yf.Ticker(info["yf"])
         df = ticker.history(period="5d", interval=cfg["yf"])
         if not df.empty:
@@ -258,11 +268,46 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
+    st.subheader("💳 Funds Management (UPI)")
+    
+    fund_tab1, fund_tab2 = st.tabs(["📥 Deposit", "📤 Withdraw"])
+    
+    with fund_tab1:
+        dep_amount = st.number_input("Deposit Amount (₹)", min_value=10.0, max_value=100000.0, value=100.0, step=10.0)
+        utr_ref = st.text_input("UPI Reference / UTR No.", placeholder="e.g. 4231XXXX8901")
+        if st.button("Confirm UPI Deposit", use_container_width=True):
+            if utr_ref.strip():
+                now_str = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
+                con.execute("INSERT INTO mrindie_transactions (timestamp_ist, type, amount, reference_no, status) VALUES (?,?,?,?,?)",
+                            (now_str, "DEPOSIT", dep_amount, utr_ref, "SUCCESS"))
+                con.commit()
+                modify_balance(con, dep_amount)
+                st.sidebar.success(f"₹{dep_amount} added successfully via UPI!")
+                st.rerun()
+            else:
+                st.sidebar.error("Kripya UTR/Reference Number enter karein!")
+
+    with fund_tab2:
+        curr_bal_val = get_account_balance(con)
+        wd_amount = st.number_input("Withdraw Amount (₹)", min_value=10.0, max_value=max(10.0, curr_bal_val), value=min(50.0, curr_bal_val), step=10.0)
+        upi_id_input = st.text_input("Your UPI ID", placeholder="example@paytm")
+        if st.button("Request UPI Withdrawal", use_container_width=True):
+            if upi_id_input.strip() and wd_amount <= curr_bal_val:
+                now_str = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
+                con.execute("INSERT INTO mrindie_transactions (timestamp_ist, type, amount, upi_id, status) VALUES (?,?,?,?,?)",
+                            (now_str, "WITHDRAWAL", wd_amount, upi_id_input, "SUCCESS"))
+                con.commit()
+                modify_balance(con, -wd_amount)
+                st.sidebar.success(f"Withdrawal request of ₹{wd_amount} sent to {upi_id_input}!")
+                st.rerun()
+            elif wd_amount > curr_bal_val:
+                st.sidebar.error("Inadequate balance!")
+            else:
+                st.sidebar.error("Kripya valid UPI ID enter karein!")
+
+    st.markdown("---")
     st.subheader("🛡️ Execution Mode")
     exec_mode = st.radio("Mode Selection", ["DEMO (Paper Trading)", "LIVE BROKER (Dhan API)"], index=0)
-    
-    if "LIVE BROKER" in exec_mode:
-        st.caption("🔑 Dhan Direct Integration Active")
     
     st.markdown("---")
     auto_pilot = st.toggle("Enable Auto-Pilot Execution", value=False)
@@ -278,13 +323,6 @@ with st.sidebar:
                 st.sidebar.success(f"Trade placed for {selected_symbol}!")
             else:
                 st.sidebar.warning("Trade blocked: Neutral signal (WAIT) or candle already traded.")
-
-    st.markdown("---")
-    if st.button("🔄 Reset Capital to ₹100", use_container_width=True):
-        con.execute("UPDATE mrindie_account_balance SET balance_inr = 100.0 WHERE id = 1")
-        con.commit()
-        st.sidebar.success("Capital reset to ₹100!")
-        st.rerun()
 
 st.info(f"Market Status: **{market_status_text}**")
 df_data, source_info = fetch_synchronized_market_data(selected_symbol, selected_tf)
@@ -365,17 +403,11 @@ else:
 
 st.divider()
 
-st.subheader("📜 Completed Trade History")
-history_df = pd.read_sql_query("SELECT * FROM mrindie_trade_history ORDER BY id DESC LIMIT 50", con)
-
-if history_df.empty:
-    st.info("Abhi tak koi trade history me record nahi hai.")
+st.subheader("💳 UPI Transaction History")
+tx_df = pd.read_sql_query("SELECT * FROM mrindie_transactions ORDER BY id DESC LIMIT 10", con)
+if tx_df.empty:
+    st.caption("Koi deposit ya withdrawal record nahi hai.")
 else:
-    for idx, row_item in history_df.iterrows():
-        status_icon = "🟢" if row_item['pnl_inr'] >= 0 else "🔴"
-        with st.expander(f"{status_icon} Trade #{row_item['id']} | {row_item['symbol']} ({row_item['bias']}) | PnL: ₹{row_item['pnl_inr']:+,.2f} | Reason: {row_item['exit_reason']}"):
-            c_a, c_b = st.columns(2)
-            c_a.markdown(f"🕒 **Entry:** `{row_item['created_at_ist']}`\n🕒 **Exit:** `{row_item['closed_at_ist']}`\n📦 **Qty:** `{row_item['quantity']}`")
-            c_b.markdown(f"📍 **Entry Price:** `₹{row_item['entry_price']:,.2f}`\n🏁 **Exit Price:** `₹{row_item['exit_price']:,.2f}`\n💰 **Net PnL:** `₹{row_item['pnl_inr']:+,.2f}`")
+    st.dataframe(tx_df, use_container_width=True)
 
 con.close()
