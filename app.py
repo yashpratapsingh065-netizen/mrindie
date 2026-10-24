@@ -1,15 +1,12 @@
 import os
 import sqlite3
-import time
 from datetime import datetime, timezone, timedelta
 
 import pandas as pd
-import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
 import yfinance as yf
 
-# Indian Standard Time (IST) Offset
 IST = timezone(timedelta(hours=5, minutes=30))
 
 st.set_page_config(
@@ -35,7 +32,6 @@ INTERVALS = {
     "1 day": {"yf": "1d", "minutes": 1440, "tv": "D"}
 }
 
-# --- DATABASE ENGINE ---
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
@@ -87,7 +83,6 @@ def connect_db():
     con.commit()
     return con
 
-# --- MARKET SESSION CHECKER ---
 def get_indian_market_status():
     now_ist = datetime.now(IST)
     current_time = now_ist.time()
@@ -120,7 +115,6 @@ def fetch_synchronized_market_data(symbol_label, timeframe_label):
         pass
     return pd.DataFrame(), "No Data"
 
-# --- STRICT SMC STRATEGY ENGINE ---
 def evaluate_strict_smc_strategy(df):
     if len(df) < 30:
         return {"bias": "WAIT", "votes": "Data insufficient", "bullish": 0, "bearish": 0, "entry": 0, "sl": 0, "tp": 0}
@@ -142,9 +136,9 @@ def evaluate_strict_smc_strategy(df):
     bearish_votes = []
 
     if last.close < eq_50:
-        bullish_votes.append("Discount Zone (Buy Zone)")
+        bullish_votes.append("Discount Zone")
     else:
-        bearish_votes.append("Premium Zone (Sell Zone)")
+        bearish_votes.append("Premium Zone")
 
     if last.low > p_prev.high and prev.close > prev.open:
         bullish_votes.append("Unmitigated Bullish FVG")
@@ -197,45 +191,14 @@ def modify_balance(con, delta):
     con.commit()
     return new_balance
 
-# --- REAL DHAN BROKER EXECUTION FUNCTION ---
-def place_dhan_real_order(client_id, access_token, symbol, bias, qty, entry, sl, tp):
-    try:
-        from dhanhq import dhanhq
-        dhan = dhanhq(client_id, access_token)
-        sec_id = INDIAN_SYMBOLS[symbol]["dhan_sec_id"]
-        transaction_type = dhan.BUY if bias == "BUY" else dhan.SELL
-        
-        # Place Real Market Order on Dhan
-        response = dhan.place_order(
-            tag='MR_INDIE_SMC',
-            transaction_type=transaction_type,
-            exchange_segment=dhan.NSE,
-            product_type=dhan.INTRA,
-            order_type=dhan.MARKET,
-            validity='DAY',
-            security_id=sec_id,
-            quantity=qty,
-            price=0
-        )
-        return True, str(response)
-    except Exception as e:
-        return False, str(e)
-
-def execute_trade_safely(con, symbol, timeframe, analysis, qty, mode, candle_ts, dhan_id="", dhan_token=""):
+def execute_trade_safely(con, symbol, timeframe, analysis, qty, mode, candle_ts):
     if analysis["bias"] == "WAIT":
-        return False, "Neutral Signal"
+        return False, "Neutral Signal (WAIT)"
 
     cursor = con.cursor()
     cursor.execute("SELECT id FROM mrindie_open_trades WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
     if cursor.fetchone():
         return False, "Duplicate Candle Trade"
-
-    if mode == "LIVE":
-        if not dhan_id or not dhan_token:
-            return False, "Dhan Client ID/Token missing!"
-        success, msg = place_dhan_real_order(dhan_id, dhan_token, symbol, analysis["bias"], qty, analysis["entry"], analysis["sl"], analysis["tp"])
-        if not success:
-            return False, f"Dhan API Error: {msg}"
 
     created_time = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     con.execute(
@@ -266,9 +229,8 @@ def close_trade_safely(con, trade_id, current_price, exit_reason="Manual Exit �
     modify_balance(con, pnl)
     return pnl
 
-# --- STREAMLIT DASHBOARD UI ---
 st.title("🇮🇳 MR. INDIE — Institutional Trading Platform")
-st.caption("Advanced SMC Confluence Engine • Anti-Duplicate Execution • Dhan Live Execution")
+st.caption("Advanced SMC Confluence Engine • Anti-Duplicate Execution • Synchronized Chart Lock")
 
 con = connect_db()
 market_status_code, market_status_text = get_indian_market_status()
@@ -290,14 +252,6 @@ with st.sidebar:
     st.subheader("🛡️ Execution Mode")
     exec_mode = st.radio("Mode Selection", ["DEMO (Paper Trading)", "LIVE BROKER (Dhan API)"], index=0)
     
-    dhan_id_val = ""
-    dhan_token_val = ""
-    
-    if "LIVE BROKER" in exec_mode:
-        st.warning("⚡ Live Trading Active! Enter Dhan API Keys below:")
-        dhan_id_val = st.text_input("Dhan Client ID", type="password")
-        dhan_token_val = st.text_input("Dhan Access Token", type="password")
-    
     st.markdown("---")
     auto_pilot = st.toggle("Enable Auto-Pilot Execution", value=False)
     
@@ -307,17 +261,17 @@ with st.sidebar:
             res_chk = evaluate_strict_smc_strategy(df_chk)
             c_ts = df_chk.index[-1]
             m_str = "LIVE" if "LIVE" in exec_mode else "DEMO"
-            ok, msg = execute_trade_safely(con, selected_symbol, selected_tf, res_chk, order_qty, m_str, c_ts, dhan_id_val, dhan_token_val)
+            ok, msg = execute_trade_safely(con, selected_symbol, selected_tf, res_chk, order_qty, m_str, c_ts)
             if ok:
                 st.sidebar.success(f"Trade placed for {selected_symbol}!")
             else:
                 st.sidebar.warning(f"Trade blocked: {msg}")
 
     st.markdown("---")
-    if st.button("🔄 Reset Paper Capital to ₹100", use_container_width=True):
+    if st.button("🔄 Reset Capital to ₹100", use_container_width=True):
         con.execute("UPDATE mrindie_account_balance SET balance_inr = 100.0 WHERE id = 1")
         con.commit()
-        st.sidebar.success("Paper balance reset to ₹100!")
+        st.sidebar.success("Capital reset to ₹100!")
         st.rerun()
 
 st.info(f"Market Status: **{market_status_text}**")
@@ -330,7 +284,7 @@ if not df_data.empty:
     mode_string = "LIVE" if "LIVE" in exec_mode else "DEMO"
 
     if auto_pilot and market_status_code == "OPEN":
-        execute_trade_safely(con, selected_symbol, selected_tf, analysis_result, order_qty, mode_string, candle_timestamp, dhan_id_val, dhan_token_val)
+        execute_trade_safely(con, selected_symbol, selected_tf, analysis_result, order_qty, mode_string, candle_timestamp)
 
     account_balance = get_account_balance(con)
     st.markdown(f"### 💼 Paper Capital: **₹{account_balance:,.2f} INR**")
@@ -349,6 +303,7 @@ with layout_left:
     tv_symbol_code = INDIAN_SYMBOLS[selected_symbol]["tv"]
     tv_interval_code = INTERVALS[selected_tf]["tv"]
     
+    # Chart symbol is now strictly locked to selected Indian symbol to avoid mismatch
     tv_html_code = f"""
     <div class="tradingview-widget-container" style="height:480px;width:100%">
       <div id="tv_chart_container" style="height:460px;width:100%"></div>
@@ -363,7 +318,7 @@ with layout_left:
         "style": "1",
         "locale": "en",
         "enable_publishing": false,
-        "allow_symbol_change": true,
+        "allow_symbol_change": false,
         "container_id": "tv_chart_container"
       }});
       </script>
@@ -387,7 +342,7 @@ if open_df.empty:
     st.info("Abhi koi open position active nahi hai.")
 else:
     for idx, row_item in open_df.iterrows():
-        with st.expander(f"📌 Trade #{row_item['id']} | {row_item['symbol']} ({row_item['bias']} - {row_item['quantity']} Qty) - Mode: {row_item['mode']}"):
+        with st.expander(f"📌 Trade #{row_item['id']} | {row_item['symbol']} ({row_item['bias']} - {row_item['quantity']} Qty)"):
             c_a, c_b = st.columns(2)
             c_a.markdown(f"🕒 **Entry Time:** `{row_item['created_at_ist']}`\n📍 **Entry Price:** `₹{row_item['entry_price']:,.2f}`\n🛑 **Stop Loss:** `₹{row_item['stop_loss']:,.2f}`")
             c_b.markdown(f"🎯 **Take Profit:** `₹{row_item['take_profit']:,.2f}`\n⚡ **Timeframe:** `{row_item['timeframe']}`\n📊 **Votes:** `{row_item['strategy_votes']}`")
