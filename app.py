@@ -21,11 +21,11 @@ st.set_page_config(
 DB_PATH = os.getenv("MRINDIE_DB_PATH", "mrindie_trading_bot.db")
 
 INDIAN_SYMBOLS = {
-    "NIFTY 50": {"yf": "^NSEI", "tv": "NSE:NIFTY", "lot": 25},
-    "BANK NIFTY": {"yf": "^NSEBANK", "tv": "NSE:BANKNIFTY", "lot": 15},
-    "RELIANCE": {"yf": "RELIANCE.NS", "tv": "NSE:RELIANCE", "lot": 1},
-    "TCS": {"yf": "TCS.NS", "tv": "NSE:TCS", "lot": 1},
-    "HDFC BANK": {"yf": "HDFCBANK.NS", "tv": "NSE:HDFCBANK", "lot": 1}
+    "NIFTY 50": {"yf": "^NSEI", "tv": "NSE:NIFTY", "lot": 25, "dhan_sec_id": "13"},
+    "BANK NIFTY": {"yf": "^NSEBANK", "tv": "NSE:BANKNIFTY", "lot": 15, "dhan_sec_id": "25"},
+    "RELIANCE": {"yf": "RELIANCE.NS", "tv": "NSE:RELIANCE", "lot": 1, "dhan_sec_id": "2885"},
+    "TCS": {"yf": "TCS.NS", "tv": "NSE:TCS", "lot": 1, "dhan_sec_id": "11536"},
+    "HDFC BANK": {"yf": "HDFCBANK.NS", "tv": "NSE:HDFCBANK", "lot": 1, "dhan_sec_id": "1333"}
 }
 
 INTERVALS = {
@@ -79,17 +79,6 @@ def connect_db():
             balance_inr REAL NOT NULL
         )
     """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS mrindie_transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp_ist TEXT NOT NULL,
-            type TEXT NOT NULL,
-            amount REAL NOT NULL,
-            upi_id TEXT,
-            reference_no TEXT,
-            status TEXT NOT NULL
-        )
-    """)
     cursor = con.cursor()
     cursor.execute("SELECT balance_inr FROM mrindie_account_balance WHERE id = 1")
     row = cursor.fetchone()
@@ -117,7 +106,6 @@ def get_indian_market_status():
     else:
         return "CLOSED", "🔴 Market Closed (Trading Hours: 9:15 AM - 3:30 PM IST)"
 
-# --- SYNCHRONIZED MARKET DATA FEED ---
 def fetch_synchronized_market_data(symbol_label, timeframe_label):
     info = INDIAN_SYMBOLS[symbol_label]
     cfg = INTERVALS[timeframe_label]
@@ -209,14 +197,45 @@ def modify_balance(con, delta):
     con.commit()
     return new_balance
 
-def execute_trade_safely(con, symbol, timeframe, analysis, qty, mode, candle_ts):
+# --- REAL DHAN BROKER EXECUTION FUNCTION ---
+def place_dhan_real_order(client_id, access_token, symbol, bias, qty, entry, sl, tp):
+    try:
+        from dhanhq import dhanhq
+        dhan = dhanhq(client_id, access_token)
+        sec_id = INDIAN_SYMBOLS[symbol]["dhan_sec_id"]
+        transaction_type = dhan.BUY if bias == "BUY" else dhan.SELL
+        
+        # Place Real Market Order on Dhan
+        response = dhan.place_order(
+            tag='MR_INDIE_SMC',
+            transaction_type=transaction_type,
+            exchange_segment=dhan.NSE,
+            product_type=dhan.INTRA,
+            order_type=dhan.MARKET,
+            validity='DAY',
+            security_id=sec_id,
+            quantity=qty,
+            price=0
+        )
+        return True, str(response)
+    except Exception as e:
+        return False, str(e)
+
+def execute_trade_safely(con, symbol, timeframe, analysis, qty, mode, candle_ts, dhan_id="", dhan_token=""):
     if analysis["bias"] == "WAIT":
-        return False
+        return False, "Neutral Signal"
 
     cursor = con.cursor()
     cursor.execute("SELECT id FROM mrindie_open_trades WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
     if cursor.fetchone():
-        return False
+        return False, "Duplicate Candle Trade"
+
+    if mode == "LIVE":
+        if not dhan_id or not dhan_token:
+            return False, "Dhan Client ID/Token missing!"
+        success, msg = place_dhan_real_order(dhan_id, dhan_token, symbol, analysis["bias"], qty, analysis["entry"], analysis["sl"], analysis["tp"])
+        if not success:
+            return False, f"Dhan API Error: {msg}"
 
     created_time = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     con.execute(
@@ -224,7 +243,7 @@ def execute_trade_safely(con, symbol, timeframe, analysis, qty, mode, candle_ts)
         (created_time, symbol, timeframe, analysis["entry"], analysis["sl"], analysis["tp"], qty, analysis["bias"], mode, analysis["votes"], str(candle_ts))
     )
     con.commit()
-    return True
+    return True, "Success"
 
 def close_trade_safely(con, trade_id, current_price, exit_reason="Manual Exit 👤"):
     cursor = con.cursor()
@@ -249,7 +268,7 @@ def close_trade_safely(con, trade_id, current_price, exit_reason="Manual Exit �
 
 # --- STREAMLIT DASHBOARD UI ---
 st.title("🇮🇳 MR. INDIE — Institutional Trading Platform")
-st.caption("Advanced SMC Confluence Engine • Anti-Duplicate Execution • Synchronized Live Feed")
+st.caption("Advanced SMC Confluence Engine • Anti-Duplicate Execution • Dhan Live Execution")
 
 con = connect_db()
 market_status_code, market_status_text = get_indian_market_status()
@@ -268,46 +287,16 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.subheader("💳 Funds Management (UPI)")
-    
-    fund_tab1, fund_tab2 = st.tabs(["📥 Deposit", "📤 Withdraw"])
-    
-    with fund_tab1:
-        dep_amount = st.number_input("Deposit Amount (₹)", min_value=10.0, max_value=100000.0, value=100.0, step=10.0)
-        utr_ref = st.text_input("UPI Reference / UTR No.", placeholder="e.g. 4231XXXX8901")
-        if st.button("Confirm UPI Deposit", use_container_width=True):
-            if utr_ref.strip():
-                now_str = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
-                con.execute("INSERT INTO mrindie_transactions (timestamp_ist, type, amount, reference_no, status) VALUES (?,?,?,?,?)",
-                            (now_str, "DEPOSIT", dep_amount, utr_ref, "SUCCESS"))
-                con.commit()
-                modify_balance(con, dep_amount)
-                st.sidebar.success(f"₹{dep_amount} added successfully via UPI!")
-                st.rerun()
-            else:
-                st.sidebar.error("Kripya UTR/Reference Number enter karein!")
-
-    with fund_tab2:
-        curr_bal_val = get_account_balance(con)
-        wd_amount = st.number_input("Withdraw Amount (₹)", min_value=10.0, max_value=max(10.0, curr_bal_val), value=min(50.0, curr_bal_val), step=10.0)
-        upi_id_input = st.text_input("Your UPI ID", placeholder="example@paytm")
-        if st.button("Request UPI Withdrawal", use_container_width=True):
-            if upi_id_input.strip() and wd_amount <= curr_bal_val:
-                now_str = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
-                con.execute("INSERT INTO mrindie_transactions (timestamp_ist, type, amount, upi_id, status) VALUES (?,?,?,?,?)",
-                            (now_str, "WITHDRAWAL", wd_amount, upi_id_input, "SUCCESS"))
-                con.commit()
-                modify_balance(con, -wd_amount)
-                st.sidebar.success(f"Withdrawal request of ₹{wd_amount} sent to {upi_id_input}!")
-                st.rerun()
-            elif wd_amount > curr_bal_val:
-                st.sidebar.error("Inadequate balance!")
-            else:
-                st.sidebar.error("Kripya valid UPI ID enter karein!")
-
-    st.markdown("---")
     st.subheader("🛡️ Execution Mode")
     exec_mode = st.radio("Mode Selection", ["DEMO (Paper Trading)", "LIVE BROKER (Dhan API)"], index=0)
+    
+    dhan_id_val = ""
+    dhan_token_val = ""
+    
+    if "LIVE BROKER" in exec_mode:
+        st.warning("⚡ Live Trading Active! Enter Dhan API Keys below:")
+        dhan_id_val = st.text_input("Dhan Client ID", type="password")
+        dhan_token_val = st.text_input("Dhan Access Token", type="password")
     
     st.markdown("---")
     auto_pilot = st.toggle("Enable Auto-Pilot Execution", value=False)
@@ -318,11 +307,18 @@ with st.sidebar:
             res_chk = evaluate_strict_smc_strategy(df_chk)
             c_ts = df_chk.index[-1]
             m_str = "LIVE" if "LIVE" in exec_mode else "DEMO"
-            success = execute_trade_safely(con, selected_symbol, selected_tf, res_chk, order_qty, m_str, c_ts)
-            if success:
+            ok, msg = execute_trade_safely(con, selected_symbol, selected_tf, res_chk, order_qty, m_str, c_ts, dhan_id_val, dhan_token_val)
+            if ok:
                 st.sidebar.success(f"Trade placed for {selected_symbol}!")
             else:
-                st.sidebar.warning("Trade blocked: Neutral signal (WAIT) or candle already traded.")
+                st.sidebar.warning(f"Trade blocked: {msg}")
+
+    st.markdown("---")
+    if st.button("🔄 Reset Paper Capital to ₹100", use_container_width=True):
+        con.execute("UPDATE mrindie_account_balance SET balance_inr = 100.0 WHERE id = 1")
+        con.commit()
+        st.sidebar.success("Paper balance reset to ₹100!")
+        st.rerun()
 
 st.info(f"Market Status: **{market_status_text}**")
 df_data, source_info = fetch_synchronized_market_data(selected_symbol, selected_tf)
@@ -334,10 +330,10 @@ if not df_data.empty:
     mode_string = "LIVE" if "LIVE" in exec_mode else "DEMO"
 
     if auto_pilot and market_status_code == "OPEN":
-        execute_trade_safely(con, selected_symbol, selected_tf, analysis_result, order_qty, mode_string, candle_timestamp)
+        execute_trade_safely(con, selected_symbol, selected_tf, analysis_result, order_qty, mode_string, candle_timestamp, dhan_id_val, dhan_token_val)
 
     account_balance = get_account_balance(con)
-    st.markdown(f"### 💼 Portfolio Capital: **₹{account_balance:,.2f} INR**")
+    st.markdown(f"### 💼 Paper Capital: **₹{account_balance:,.2f} INR**")
     
     col1, col2, col3 = st.columns(3)
     col1.metric(f"Live Price ({selected_symbol})", f"₹{current_price:,.2f}")
@@ -391,7 +387,7 @@ if open_df.empty:
     st.info("Abhi koi open position active nahi hai.")
 else:
     for idx, row_item in open_df.iterrows():
-        with st.expander(f"📌 Trade #{row_item['id']} | {row_item['symbol']} ({row_item['bias']} - {row_item['quantity']} Qty)"):
+        with st.expander(f"📌 Trade #{row_item['id']} | {row_item['symbol']} ({row_item['bias']} - {row_item['quantity']} Qty) - Mode: {row_item['mode']}"):
             c_a, c_b = st.columns(2)
             c_a.markdown(f"🕒 **Entry Time:** `{row_item['created_at_ist']}`\n📍 **Entry Price:** `₹{row_item['entry_price']:,.2f}`\n🛑 **Stop Loss:** `₹{row_item['stop_loss']:,.2f}`")
             c_b.markdown(f"🎯 **Take Profit:** `₹{row_item['take_profit']:,.2f}`\n⚡ **Timeframe:** `{row_item['timeframe']}`\n📊 **Votes:** `{row_item['strategy_votes']}`")
@@ -400,14 +396,5 @@ else:
                 pnl_realized = close_trade_safely(con, row_item['id'], current_price, exit_reason="Manual Square-Off 👤")
                 st.toast(f"Trade #{row_item['id']} closed! Realized PnL: ₹{pnl_realized:+,.2f}")
                 st.rerun()
-
-st.divider()
-
-st.subheader("💳 UPI Transaction History")
-tx_df = pd.read_sql_query("SELECT * FROM mrindie_transactions ORDER BY id DESC LIMIT 10", con)
-if tx_df.empty:
-    st.caption("Koi deposit ya withdrawal record nahi hai.")
-else:
-    st.dataframe(tx_df, use_container_width=True)
 
 con.close()
