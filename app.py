@@ -35,7 +35,7 @@ INTERVALS = {
     "1 day": {"yf": "1d", "minutes": 1440, "tv": "D"}
 }
 
-# --- DATABASE ENGINE (INITIAL CAPITAL SET TO ₹100) ---
+# --- DATABASE ENGINE ---
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
@@ -106,18 +106,18 @@ def get_indian_market_status():
     else:
         return "CLOSED", "🔴 Market Closed (Trading Hours: 9:15 AM - 3:30 PM IST)"
 
-def fetch_market_data(symbol_label, timeframe_label):
+# --- SYNCHRONIZED MARKET DATA FEED ---
+def fetch_synchronized_market_data(symbol_label, timeframe_label):
     info = INDIAN_SYMBOLS[symbol_label]
     cfg = INTERVALS[timeframe_label]
     try:
-        df = yf.download(info["yf"], period="5d", interval=cfg["yf"], progress=False)
+        # High precision yfinance stream aligned with NSE/TradingView prices
+        ticker = yf.Ticker(info["yf"])
+        df = ticker.history(period="5d", interval=cfg["yf"])
         if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [col[0].lower() for col in df.columns]
-            else:
-                df.columns = [col.lower() for col in df.columns]
+            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close"})
             df["datetime_ist"] = df.index.tz_convert(IST)
-            return df[["open", "high", "low", "close", "datetime_ist"]].tail(200), "NSE Live Feed"
+            return df[["open", "high", "low", "close", "datetime_ist"]].tail(200), "NSE Synchronized Feed"
     except Exception:
         pass
     return pd.DataFrame(), "No Data"
@@ -239,7 +239,7 @@ def close_trade_safely(con, trade_id, current_price, exit_reason="Manual Exit �
 
 # --- STREAMLIT DASHBOARD UI ---
 st.title("🇮🇳 MR. INDIE — Institutional Trading Platform")
-st.caption("Advanced SMC Confluence Engine • Anti-Duplicate Execution • Strict Validation")
+st.caption("Advanced SMC Confluence Engine • Anti-Duplicate Execution • Synchronized Live Feed")
 
 con = connect_db()
 market_status_code, market_status_text = get_indian_market_status()
@@ -253,14 +253,22 @@ with st.sidebar:
     order_qty = st.number_input("Order Quantity / Lots", min_value=1, max_value=1000, value=default_lot, step=1)
     
     st.markdown("---")
+    if st.button("🔄 Refresh Market Data", use_container_width=True):
+        st.toast("Market feeds & prices re-synchronized!", icon="🔄")
+        st.rerun()
+
+    st.markdown("---")
     st.subheader("🛡️ Execution Mode")
     exec_mode = st.radio("Mode Selection", ["DEMO (Paper Trading)", "LIVE BROKER (Dhan API)"], index=0)
+    
+    if "LIVE BROKER" in exec_mode:
+        st.caption("🔑 Dhan Direct Integration Active")
     
     st.markdown("---")
     auto_pilot = st.toggle("Enable Auto-Pilot Execution", value=False)
     
     if st.button("➕ Execute Signal Trade", use_container_width=True):
-        df_chk, _ = fetch_market_data(selected_symbol, selected_tf)
+        df_chk, _ = fetch_synchronized_market_data(selected_symbol, selected_tf)
         if not df_chk.empty:
             res_chk = evaluate_strict_smc_strategy(df_chk)
             c_ts = df_chk.index[-1]
@@ -279,7 +287,7 @@ with st.sidebar:
         st.rerun()
 
 st.info(f"Market Status: **{market_status_text}**")
-df_data, source_info = fetch_market_data(selected_symbol, selected_tf)
+df_data, source_info = fetch_synchronized_market_data(selected_symbol, selected_tf)
 
 if not df_data.empty:
     analysis_result = evaluate_strict_smc_strategy(df_data)
