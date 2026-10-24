@@ -35,7 +35,7 @@ INTERVALS = {
     "1 day": {"yf": "1d", "minutes": 1440, "tv": "D"}
 }
 
-# --- DATABASE ENGINE (BIG MAN SCHEMA MATCHED) ---
+# --- DATABASE ENGINE (INITIAL CAPITAL SET TO ₹100) ---
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
@@ -83,7 +83,7 @@ def connect_db():
     cursor.execute("SELECT balance_inr FROM mrindie_account_balance WHERE id = 1")
     row = cursor.fetchone()
     if not row:
-        con.execute("INSERT INTO mrindie_account_balance (id, balance_inr) VALUES (1, 100000.0)")
+        con.execute("INSERT INTO mrindie_account_balance (id, balance_inr) VALUES (1, 100.0)")
     con.commit()
     return con
 
@@ -122,7 +122,7 @@ def fetch_market_data(symbol_label, timeframe_label):
         pass
     return pd.DataFrame(), "No Data"
 
-# --- STRICT SMC STRATEGY & VOTING ENGINE ---
+# --- STRICT SMC STRATEGY ENGINE ---
 def evaluate_strict_smc_strategy(df):
     if len(df) < 30:
         return {"bias": "WAIT", "votes": "Data insufficient", "bullish": 0, "bearish": 0, "entry": 0, "sl": 0, "tp": 0}
@@ -143,19 +143,16 @@ def evaluate_strict_smc_strategy(df):
     bullish_votes = []
     bearish_votes = []
 
-    # 1. Premium / Discount Zone Check
     if last.close < eq_50:
         bullish_votes.append("Discount Zone (Buy Zone)")
     else:
         bearish_votes.append("Premium Zone (Sell Zone)")
 
-    # 2. Unmitigated FVG Check
     if last.low > p_prev.high and prev.close > prev.open:
         bullish_votes.append("Unmitigated Bullish FVG")
     elif last.high < p_prev.low and prev.close < prev.open:
         bearish_votes.append("Unmitigated Bearish FVG")
 
-    # 3. Wick Rejections
     if lower_wick >= body * 1.5 and last.close > last.open:
         bullish_votes.append("Demand Wick Rejection")
     elif upper_wick >= body * 1.5 and last.close < last.open:
@@ -164,13 +161,12 @@ def evaluate_strict_smc_strategy(df):
     b_score = len(bullish_votes)
     s_score = len(bearish_votes)
 
-    # STRICT LOGIC: Agar Bearish votes zyada hain, toh Bullish trade bilkul nahi banegi!
     if b_score > s_score:
         bias = "BUY"
     elif s_score > b_score:
         bias = "SELL"
     else:
-        bias = "WAIT"  # Neutral / Conflict state prevents false execution
+        bias = "WAIT"
 
     curr_close = float(last.close)
     sl_pts = max(rng * 1.5, 15.0 if curr_close > 1000 else 2.0)
@@ -195,7 +191,7 @@ def get_account_balance(con):
     cursor = con.cursor()
     cursor.execute("SELECT balance_inr FROM mrindie_account_balance WHERE id = 1")
     row = cursor.fetchone()
-    return float(row[0]) if row else 100000.0
+    return float(row[0]) if row else 100.0
 
 def modify_balance(con, delta):
     new_balance = get_account_balance(con) + delta
@@ -210,7 +206,7 @@ def execute_trade_safely(con, symbol, timeframe, analysis, qty, mode, candle_ts)
     cursor = con.cursor()
     cursor.execute("SELECT id FROM mrindie_open_trades WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
     if cursor.fetchone():
-        return False  # Anti-duplicate candle protection
+        return False
 
     created_time = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     con.execute(
@@ -241,7 +237,7 @@ def close_trade_safely(con, trade_id, current_price, exit_reason="Manual Exit �
     modify_balance(con, pnl)
     return pnl
 
-# --- STREAMLIT USER INTERFACE ---
+# --- STREAMLIT DASHBOARD UI ---
 st.title("🇮🇳 MR. INDIE — Institutional Trading Platform")
 st.caption("Advanced SMC Confluence Engine • Anti-Duplicate Execution • Strict Validation")
 
@@ -271,15 +267,15 @@ with st.sidebar:
             m_str = "LIVE" if "LIVE" in exec_mode else "DEMO"
             success = execute_trade_safely(con, selected_symbol, selected_tf, res_chk, order_qty, m_str, c_ts)
             if success:
-                st.sidebar.success(f"Trade successfully placed for {selected_symbol}!")
+                st.sidebar.success(f"Trade placed for {selected_symbol}!")
             else:
                 st.sidebar.warning("Trade blocked: Neutral signal (WAIT) or candle already traded.")
 
     st.markdown("---")
-    if st.button("🔄 Reset Account Capital (₹1,00,000)", use_container_width=True):
-        con.execute("UPDATE mrindie_account_balance SET balance_inr = 100000.0 WHERE id = 1")
+    if st.button("🔄 Reset Capital to ₹100", use_container_width=True):
+        con.execute("UPDATE mrindie_account_balance SET balance_inr = 100.0 WHERE id = 1")
         con.commit()
-        st.sidebar.success("Capital reset successfully!")
+        st.sidebar.success("Capital reset to ₹100!")
         st.rerun()
 
 st.info(f"Market Status: **{market_status_text}**")
